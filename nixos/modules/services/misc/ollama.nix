@@ -174,6 +174,18 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = (cfg.home == "/var/lib/ollama" && cfg.models == "${cfg.home}/models") || cfg.user != null;
+        message = ''
+          When setting a custom `services.ollama.home` or `services.ollama.models`, you must also set `services.ollama.user`.
+          This is because a `DynamicUser` can only manage directories under `/var/lib`.
+          NixOS will automatically create the specified user and home directory with the correct permissions.
+          The `models` directory will also be created and given the correct ownership.
+        '';
+      }
+    ];
+
     users = lib.mkIf staticUser {
       users.${cfg.user} = {
         inherit (cfg) home;
@@ -182,6 +194,11 @@ in
       };
       groups.${cfg.group} = { };
     };
+
+    systemd.tmpfiles.rules = lib.mkIf (cfg.user != null) [
+      "d '${cfg.home}' 0750 ${cfg.user} ${cfg.group} - -"
+      "d '${cfg.models}' 0750 ${cfg.user} ${cfg.group} - -"
+    ];
 
     systemd.services.ollama = {
       description = "Server for local large language models";
@@ -198,16 +215,10 @@ in
           HSA_OVERRIDE_GFX_VERSION = cfg.rocmOverrideGfx;
         };
       serviceConfig =
-        lib.optionalAttrs staticUser {
-          User = cfg.user;
-          Group = cfg.group;
-        }
-        // {
+        {
           Type = "exec";
-          DynamicUser = true;
           ExecStart = "${lib.getExe ollamaPackage} serve";
           WorkingDirectory = cfg.home;
-          StateDirectory = [ "ollama" ];
           ReadWritePaths = [
             cfg.home
             cfg.models
@@ -261,6 +272,14 @@ in
             "~@privileged"
           ];
           UMask = "0077";
+        }
+        // lib.optionalAttrs (cfg.user != null) {
+          User = cfg.user;
+          Group = cfg.group;
+        }
+        // lib.optionalAttrs (cfg.user == null) {
+          DynamicUser = true;
+          StateDirectory = [ "ollama" ];
         };
     };
 
@@ -275,12 +294,16 @@ in
       environment = config.systemd.services.ollama.environment;
       serviceConfig = {
         Type = "exec";
-        DynamicUser = true;
         Restart = "on-failure";
         # bounded exponential backoff
         RestartSec = "1s";
         RestartMaxDelaySec = "2h";
         RestartSteps = "10";
+      } // lib.optionalAttrs (cfg.user != null) {
+        User = cfg.user;
+        Group = cfg.group;
+      } // lib.optionalAttrs (cfg.user == null) {
+        DynamicUser = true;
       };
 
       script = ''
